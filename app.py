@@ -8,15 +8,35 @@ import my_pb2
 import output_pb2
 import jwt
 
+import random
+
 app = Flask(__name__)
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 11; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36",
+    "GarenaMSDK/4.0.19P9(SM-M526B ;Android 13;pt;BR;)",
+    "GarenaMSDK/4.0.15P1(Pixel 4;Android 11;en;US;)"
+]
 
 # Global session to maintain cookies across requests
 garena_session = requests.Session()
-garena_session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Connection": "keep-alive"
-})
+
+def get_random_headers(referer=None):
+    ip = f"{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+        "X-Forwarded-For": ip,
+        "X-Real-IP": ip
+    }
+    if referer:
+        headers["Referer"] = referer
+        headers["Origin"] = referer.split('/', 3)[0] + '//' + referer.split('/', 3)[2]
+    return headers
 
 AES_KEY = b'Yg&tc%DEuh6%Zc^8'
 AES_IV = b'6oyZDr22E3ychjM%'
@@ -30,15 +50,15 @@ def fetch_open_id(access_token):
     try:
         # Step 1: Inspect token to get UID
         uid_url = "https://prod-api.reward.ff.garena.com/redemption/api/auth/inspect_token/"
-        uid_headers = {
-            "authority": "prod-api.reward.ff.garena.com",
-            "access-token": access_token,
-            "origin": "https://reward.ff.garena.com",
-            "referer": "https://reward.ff.garena.com/"
-        }
+        
+        # Refresh session headers for this attempt
+        current_headers = get_random_headers(referer="https://reward.ff.garena.com/")
+        current_headers["access-token"] = access_token
+        
+        # Add random delay to prevent rate limiting
+        time.sleep(random.uniform(0.5, 1.5))
 
-        # Use the global session
-        uid_res = garena_session.get(uid_url, headers=uid_headers, timeout=10)
+        uid_res = garena_session.get(uid_url, headers=current_headers, timeout=10)
         if uid_res.status_code != 200:
             return None, f"Garena inspect_token failed: {uid_res.status_code}"
             
@@ -51,20 +71,19 @@ def fetch_open_id(access_token):
         # Step 2: Login with UID to get OpenID
         openid_url = "https://shop2game.com/api/auth/player_id_login"
         
-        openid_headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "X-Requested-With": "com.garena.game.kgid",
-            "User-Agent": "GarenaMSDK/4.0.19P9(SM-M526B ;Android 13;pt;BR;)"
-        }
+        # Update headers for shop2game
+        openid_headers = get_random_headers(referer="https://shop2game.com/app")
+        openid_headers["Content-Type"] = "application/json"
+        openid_headers["X-Requested-With"] = "com.garena.game.kgid"
         
         app_ids = [100067, 100065]
         last_error = "Unknown error"
         
-        # Ensure session has initial cookies from shop2game if not already present
+        # If we got 403 previously or no cookies, refresh base cookies
         if not garena_session.cookies.get_dict(domain="shop2game.com"):
             try:
-                garena_session.get("https://shop2game.com/app", timeout=5)
+                garena_session.get("https://shop2game.com/app", headers=get_random_headers(), timeout=5)
+                time.sleep(random.uniform(1, 2))
             except:
                 pass
 
@@ -75,13 +94,10 @@ def fetch_open_id(access_token):
             }
 
             try:
-                # Small delay to mimic human behavior
-                time.sleep(1)
+                # Randomized delay
+                time.sleep(random.uniform(1, 2.5))
                 
-                # Copy current headers to avoid modifying global ones
-                headers = openid_headers.copy()
-                
-                openid_res = garena_session.post(openid_url, headers=headers, json=payload, timeout=10)
+                openid_res = garena_session.post(openid_url, headers=openid_headers, json=payload, timeout=10)
                 
                 if openid_res.status_code == 200:
                     openid_data = openid_res.json()
@@ -89,10 +105,16 @@ def fetch_open_id(access_token):
                         return openid_data["open_id"], None
                     elif "url" in openid_data and "captcha" in openid_data["url"]:
                         last_error = "Captcha detected"
-                        # Try to refresh session on captcha
+                        # Heavy session reset
                         garena_session.cookies.clear()
-                        garena_session.get("https://shop2game.com/app", timeout=5)
+                        # Change identity for next attempt
+                        openid_headers = get_random_headers(referer="https://shop2game.com/app")
+                        openid_headers.update({"Content-Type": "application/json", "X-Requested-With": "com.garena.game.kgid"})
                         continue
+                elif openid_res.status_code == 403:
+                    last_error = f"403 Forbidden (WAF/Captcha): {openid_res.text[:100]}"
+                    garena_session.cookies.clear()
+                    continue
                 
                 last_error = f"Status {openid_res.status_code}: {openid_res.text[:100]}"
             except Exception as e:
