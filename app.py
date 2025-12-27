@@ -77,50 +77,53 @@ def fetch_open_id(access_token):
         # If shop2game is blocking, we'll try an alternative shop2game endpoint or mobile API
         openid_url = "https://shop2game.com/api/auth/player_id_login"
         
-        # Use reachable shop2game regions
-        regions = ["https://shop2game.com", "https://vn.shop2game.com"]
+        # Use ONLY the primary stable shop2game domain
+        # Subdomains like vn. or th. are often blocked or don't resolve from cloud environments
+        base_url = "https://shop2game.com"
+        api_url = f"{base_url}/api/auth/player_id_login"
         
         last_error = "Unknown error"
         try:
-            for base_url in regions:
-                api_url = f"{base_url}/api/auth/player_id_login"
-                for attempt in range(2):
-                    # Rotate headers and identity
-                    headers = get_random_headers(referer=f"{base_url}/app")
-                    headers.update({
-                        "Content-Type": "application/json",
-                        "X-Requested-With": "com.garena.game.kgid",
-                        "Origin": base_url,
-                        "Referer": f"{base_url}/app",
-                        "Sec-Fetch-Dest": "empty",
-                        "Sec-Fetch-Mode": "cors",
-                        "Sec-Fetch-Site": "same-origin"
-                    })
-                    
-                    # Reset session for clean state
-                    garena_session.cookies.clear()
-                    try:
-                        # Mimic landing page with more realistic timeout
-                        garena_session.get(f"{base_url}/app", headers=get_random_headers(), timeout=10)
-                        time.sleep(random.uniform(1.5, 3.5))
-                    except: pass
+            for attempt in range(3):
+                # Rotate identity completely for each attempt
+                headers = get_random_headers(referer=f"{base_url}/app")
+                headers.update({
+                    "Content-Type": "application/json",
+                    "X-Requested-With": "com.garena.game.kgid",
+                    "Origin": base_url,
+                    "Referer": f"{base_url}/app"
+                })
+                
+                garena_session.cookies.clear()
+                try:
+                    # Longer timeout and more reliable pre-flight
+                    garena_session.get(f"{base_url}/app", headers=get_random_headers(), timeout=15)
+                    time.sleep(random.uniform(2.0, 5.0))
+                except Exception as e:
+                    last_error = f"Pre-flight failed: {str(e)}"
+                    continue
 
-                    try:
-                        # More human-like payload and delay
-                        payload = {"app_id": 100067, "login_id": str(uid)}
-                        res = garena_session.post(api_url, headers=headers, json=payload, timeout=15)
-                        
-                        if res.status_code == 200:
-                            data = res.json()
-                            if "open_id" in data:
-                                return data["open_id"], None
-                            elif "url" in data and "captcha" in data["url"]:
-                                last_error = f"Captcha triggered at {base_url}"
-                                break 
-                        elif res.status_code == 403:
-                            last_error = f"403 Forbidden at {base_url} (WAF)"
-                    except Exception as e:
-                        last_error = f"Request error at {base_url}: {str(e)}"
+                try:
+                    payload = {"app_id": 100067, "login_id": str(uid)}
+                    res = garena_session.post(api_url, headers=headers, json=payload, timeout=20)
+                    
+                    if res.status_code == 200:
+                        data = res.json()
+                        if "open_id" in data:
+                            return data["open_id"], None
+                        elif "url" in data and "captcha" in data["url"]:
+                            last_error = "Captcha triggered (DataDome)"
+                            # Increase delay on captcha
+                            time.sleep(5)
+                    elif res.status_code == 403:
+                        last_error = "403 Forbidden (WAF/Cloudflare)"
+                    else:
+                        last_error = f"Status {res.status_code}: {res.text[:100]}"
+                except Exception as e:
+                    last_error = f"Request error: {str(e)}"
+                
+                # Small cool-down between retries
+                time.sleep(random.uniform(2, 4))
         except Exception as e:
             last_error = f"System error: {str(e)}"
             
