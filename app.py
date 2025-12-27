@@ -48,79 +48,78 @@ def encrypt_message(plaintext):
 
 def fetch_open_id(access_token):
     try:
-        # Step 1: Inspect token to get UID
-        session = requests.Session()
-        
+        # Step 1: Inspect token to get UID - Using internal endpoint with less protection
         uid_url = "https://prod-api.reward.ff.garena.com/redemption/api/auth/inspect_token/"
         
-        # Identity rotation
-        headers = get_random_headers(referer="https://reward.ff.garena.com/")
-        headers["access-token"] = access_token
-        
-        # Mimic real user timing
-        time.sleep(random.uniform(1.0, 2.0))
-        uid_res = session.get(uid_url, headers=headers, timeout=10)
-        
-        if uid_res.status_code != 200:
-            if uid_res.status_code == 401:
-                return None, "Invalid access token"
-            return None, f"Garena inspection failed: {uid_res.status_code}"
+        # Identity rotation and session management
+        for attempt in range(3):
+            headers = get_random_headers(referer="https://reward.ff.garena.com/")
+            headers["access-token"] = access_token
             
-        uid_data = uid_res.json()
-        uid = uid_data.get("uid") or uid_data.get("data", {}).get("uid")
-        
-        if not uid:
-            return None, "Failed to extract UID"
-
-        # Step 2: Login with UID
-        # shop2game protection is extremely high. 
-        # We'll try to rotate between different app IDs and use a fresh session identity
-        base_url = "https://shop2game.com"
-        openid_url = f"{base_url}/api/auth/player_id_login"
-        
-        app_ids = [100067, 100065, 100063]
-        random.shuffle(app_ids)
-
-        for app_id in app_ids:
-            # Refresh session and identity for each app_id attempt if blocked
-            headers = {
-                "User-Agent": random.choice(USER_AGENTS),
-                "Content-Type": "application/json",
-                "X-Requested-With": "com.garena.game.kgid",
-                "Accept": "application/json",
-                "Connection": "keep-alive",
-                "Origin": base_url,
-                "Referer": f"{base_url}/app",
-                "X-Forwarded-For": f"{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
-            }
-            
-            # Fresh pre-flight
             try:
-                session.cookies.clear()
-                session.get(f"{base_url}/app", headers=get_random_headers(), timeout=10)
-                time.sleep(random.uniform(2.0, 4.0))
+                time.sleep(random.uniform(1.0, 2.0))
+                uid_res = garena_session.get(uid_url, headers=headers, timeout=10)
+                if uid_res.status_code == 200:
+                    uid_data = uid_res.json()
+                    uid = uid_data.get("uid") or uid_data.get("data", {}).get("uid")
+                    if uid: break
+                elif uid_res.status_code == 401:
+                    return None, "Invalid or expired access token"
             except:
                 pass
+            garena_session.cookies.clear()
+        else:
+            return None, "Garena token validation failed (Cloudflare 403)"
 
-            payload = {"app_id": app_id, "login_id": str(uid)}
-            try:
-                res = session.post(openid_url, headers=headers, json=payload, timeout=15)
-                
-                if res.status_code == 200:
-                    data = res.json()
-                    if "open_id" in data:
-                        return data["open_id"], None
-                    elif "url" in data and "captcha" in data["url"]:
-                        continue # Try next app_id
-                elif res.status_code == 403:
-                    continue # Try next app_id
-            except:
-                continue
-
-        return None, "Garena login failed after multiple attempts (403/Captcha). Protection is very high."
+        # Step 2: Alternative approach - Try direct Garena Mobile API endpoint
+        # Shop2game WAF is very strict on Cloud IPs. We'll try to mimic the mobile app's direct login
+        mobile_api_url = "https://kwas.garena.com/api/player_info" # Internal Garena API
+        shop_api_url = "https://shop2game.com/api/auth/player_id_login"
         
+        last_error = "Unknown error"
+        
+        # Try different Garena Apps (Free Fire, Free Fire Max)
+        app_ids = [100067, 100065]
+        
+        for app_id in app_ids:
+            for attempt in range(2):
+                # Using mobile app-specific headers which often bypass web WAFs
+                headers = {
+                    "User-Agent": "GarenaMSDK/4.0.19P9(SM-M526B ;Android 13;pt;BR;)",
+                    "Content-Type": "application/json",
+                    "X-Requested-With": "com.garena.game.kgid",
+                    "Accept": "application/json",
+                    "Connection": "keep-alive"
+                }
+                
+                # Randomized Delay
+                time.sleep(random.uniform(2.5, 4.5))
+                
+                try:
+                    # Try to hit the endpoint directly without full session pre-flight
+                    # to avoid triggering JS-based DataDome checks
+                    payload = {"app_id": app_id, "login_id": str(uid)}
+                    res = garena_session.post(shop_api_url, headers=headers, json=payload, timeout=15)
+                    
+                    if res.status_code == 200:
+                        data = res.json()
+                        if "open_id" in data:
+                            return data["open_id"], None
+                        elif "url" in data and "captcha" in data["url"]:
+                            last_error = "Anti-bot triggered (Captcha)"
+                    elif res.status_code == 403:
+                        # If blocked, try to simulate a full browser handshake ONCE
+                        garena_session.cookies.clear()
+                        garena_session.get("https://shop2game.com/app", timeout=10)
+                        last_error = "403 Cloudflare/WAF Protection"
+                    else:
+                        last_error = f"API Status {res.status_code}"
+                except Exception as e:
+                    last_error = str(e)
+                    
+        return None, f"Bypass unsuccessful: {last_error}. Garena servers are heavily protected right now. Please wait 5-10 minutes and try again."
     except Exception as e:
-        return None, f"Bypass failed: {str(e)}"
+        return None, f"System Exception: {str(e)}"
 
 @app.route('/access-jwt', methods=['GET'])
 def majorlogin_jwt():
