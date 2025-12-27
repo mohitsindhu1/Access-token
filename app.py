@@ -51,79 +51,73 @@ def fetch_open_id(access_token):
         # Step 1: Inspect token to get UID
         uid_url = "https://prod-api.reward.ff.garena.com/redemption/api/auth/inspect_token/"
         
-        # Refresh session headers for this attempt
-        current_headers = get_random_headers(referer="https://reward.ff.garena.com/")
-        current_headers["access-token"] = access_token
-        
-        # Add random delay to prevent rate limiting
-        time.sleep(random.uniform(0.5, 1.5))
-
-        uid_res = garena_session.get(uid_url, headers=current_headers, timeout=10)
-        if uid_res.status_code != 200:
-            return None, f"Garena inspect_token failed: {uid_res.status_code}"
+        for attempt in range(2):
+            current_headers = get_random_headers(referer="https://reward.ff.garena.com/")
+            current_headers["access-token"] = access_token
             
-        uid_data = uid_res.json()
-        uid = uid_data.get("uid") or uid_data.get("data", {}).get("uid")
-            
-        if not uid:
-            return None, f"Failed to extract UID from Garena: {uid_res.text}"
+            time.sleep(random.uniform(1.0, 2.0))
+            try:
+                uid_res = garena_session.get(uid_url, headers=current_headers, timeout=10)
+                if uid_res.status_code == 200:
+                    uid_data = uid_res.json()
+                    uid = uid_data.get("uid") or uid_data.get("data", {}).get("uid")
+                    if uid: break
+                elif uid_res.status_code == 403:
+                    garena_session.cookies.clear()
+            except:
+                pass
+        else:
+            return None, "Failed to get UID after retries"
 
         # Step 2: Login with UID to get OpenID
         openid_url = "https://shop2game.com/api/auth/player_id_login"
-        
-        # Update headers for shop2game
-        openid_headers = get_random_headers(referer="https://shop2game.com/app")
-        openid_headers["Content-Type"] = "application/json"
-        openid_headers["X-Requested-With"] = "com.garena.game.kgid"
-        
         app_ids = [100067, 100065]
         last_error = "Unknown error"
         
-        # If we got 403 previously or no cookies, refresh base cookies
-        if not garena_session.cookies.get_dict(domain="shop2game.com"):
-            try:
-                garena_session.get("https://shop2game.com/app", headers=get_random_headers(), timeout=5)
-                time.sleep(random.uniform(1, 2))
-            except:
-                pass
-
+        # Identity rotation for shop2game
         for app_id in app_ids:
-            payload = {
-                "app_id": app_id,
-                "login_id": str(uid)
-            }
-
-            try:
-                # Randomized delay
-                time.sleep(random.uniform(1, 2.5))
+            for attempt in range(2):
+                openid_headers = get_random_headers(referer="https://shop2game.com/app")
+                openid_headers.update({
+                    "Content-Type": "application/json",
+                    "X-Requested-With": "com.garena.game.kgid",
+                    "Sec-Fetch-Dest": "empty",
+                    "Sec-Fetch-Mode": "cors",
+                    "Sec-Fetch-Site": "same-origin"
+                })
                 
-                openid_res = garena_session.post(openid_url, headers=openid_headers, json=payload, timeout=10)
-                
-                if openid_res.status_code == 200:
-                    openid_data = openid_res.json()
-                    if "open_id" in openid_data:
-                        return openid_data["open_id"], None
-                    elif "url" in openid_data and "captcha" in openid_data["url"]:
-                        last_error = "Captcha detected"
-                        # Heavy session reset
-                        garena_session.cookies.clear()
-                        # Change identity for next attempt
-                        openid_headers = get_random_headers(referer="https://shop2game.com/app")
-                        openid_headers.update({"Content-Type": "application/json", "X-Requested-With": "com.garena.game.kgid"})
-                        continue
-                elif openid_res.status_code == 403:
-                    last_error = f"403 Forbidden (WAF/Captcha): {openid_res.text[:100]}"
+                # Full session reset if we previously failed
+                if attempt > 0:
                     garena_session.cookies.clear()
-                    continue
-                
-                last_error = f"Status {openid_res.status_code}: {openid_res.text[:100]}"
-            except Exception as e:
-                last_error = str(e)
+                    try:
+                        garena_session.get("https://shop2game.com/app", headers=get_random_headers(), timeout=5)
+                        time.sleep(2)
+                    except: pass
 
-        return None, f"Could not bypass protection: {last_error}"
+                payload = {"app_id": app_id, "login_id": str(uid)}
 
+                try:
+                    time.sleep(random.uniform(2.0, 4.0)) # Longer, more natural delay
+                    openid_res = garena_session.post(openid_url, headers=openid_headers, json=payload, timeout=12)
+                    
+                    if openid_res.status_code == 200:
+                        openid_data = openid_res.json()
+                        if "open_id" in openid_data:
+                            return openid_data["open_id"], None
+                        elif "url" in openid_data and "captcha" in openid_data["url"]:
+                            last_error = "Captcha detected (DataDome)"
+                            continue
+                    elif openid_res.status_code == 403:
+                        last_error = "403 Forbidden (Cloudflare/WAF)"
+                        continue
+                    
+                    last_error = f"Status {openid_res.status_code}"
+                except Exception as e:
+                    last_error = str(e)
+            
+        return None, f"Protection bypass failed: {last_error}"
     except Exception as e:
-        return None, f"Exception occurred: {str(e)}"
+        return None, f"Exception: {str(e)}"
 
 @app.route('/access-jwt', methods=['GET'])
 def majorlogin_jwt():
