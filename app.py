@@ -67,55 +67,53 @@ def fetch_open_id(access_token):
             except:
                 pass
         else:
-            return None, "Failed to get UID after retries"
+            return None, "Garena token inspection failed (403/WAF)"
 
-        # Step 2: Login with UID to get OpenID
-        openid_url = "https://shop2game.com/api/auth/player_id_login"
-        app_ids = [100067, 100065]
-        last_error = "Unknown error"
+        # Step 2: Use Reward API directly to avoid shop2game protection
+        # The reward API already trusts this access token.
+        # We can try to use the UID directly in the MajorLogin step if we have the access_token.
+        # However, MajorLogin needs open_id.
         
-        # Identity rotation for shop2game
-        for app_id in app_ids:
+        # If shop2game is blocking, we'll try an alternative shop2game endpoint or mobile API
+        openid_url = "https://shop2game.com/api/auth/player_id_login"
+        
+        # Try to use a different shop2game region which might have lighter protection
+        regions = ["https://shop2game.com", "https://vn.shop2game.com", "https://th.shop2game.com"]
+        
+        last_error = "Unknown error"
+        for base_url in regions:
+            api_url = f"{base_url}/api/auth/player_id_login"
             for attempt in range(2):
-                openid_headers = get_random_headers(referer="https://shop2game.com/app")
-                openid_headers.update({
+                headers = get_random_headers(referer=f"{base_url}/app")
+                headers.update({
                     "Content-Type": "application/json",
                     "X-Requested-With": "com.garena.game.kgid",
-                    "Sec-Fetch-Dest": "empty",
-                    "Sec-Fetch-Mode": "cors",
-                    "Sec-Fetch-Site": "same-origin"
+                    "Origin": base_url,
+                    "Referer": f"{base_url}/app"
                 })
                 
-                # Full session reset if we previously failed
                 if attempt > 0:
                     garena_session.cookies.clear()
                     try:
-                        garena_session.get("https://shop2game.com/app", headers=get_random_headers(), timeout=5)
-                        time.sleep(2)
+                        garena_session.get(f"{base_url}/app", timeout=5)
                     except: pass
 
-                payload = {"app_id": app_id, "login_id": str(uid)}
-
                 try:
-                    time.sleep(random.uniform(2.0, 4.0)) # Longer, more natural delay
-                    openid_res = garena_session.post(openid_url, headers=openid_headers, json=payload, timeout=12)
+                    time.sleep(random.uniform(2.0, 4.0))
+                    res = garena_session.post(api_url, headers=headers, json={"app_id": 100067, "login_id": str(uid)}, timeout=12)
                     
-                    if openid_res.status_code == 200:
-                        openid_data = openid_res.json()
-                        if "open_id" in openid_data:
-                            return openid_data["open_id"], None
-                        elif "url" in openid_data and "captcha" in openid_data["url"]:
-                            last_error = "Captcha detected (DataDome)"
-                            continue
-                    elif openid_res.status_code == 403:
-                        last_error = "403 Forbidden (Cloudflare/WAF)"
-                        continue
-                    
-                    last_error = f"Status {openid_res.status_code}"
+                    if res.status_code == 200:
+                        data = res.json()
+                        if "open_id" in data:
+                            return data["open_id"], None
+                        elif "url" in data and "captcha" in data["url"]:
+                            last_error = "Captcha triggered"
+                    elif res.status_code == 403:
+                        last_error = f"403 Forbidden at {base_url}"
                 except Exception as e:
                     last_error = str(e)
             
-        return None, f"Protection bypass failed: {last_error}"
+        return None, f"Bypass failed: {last_error}. Try again after some time or use a different IP."
     except Exception as e:
         return None, f"Exception: {str(e)}"
 
