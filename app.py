@@ -77,43 +77,54 @@ def fetch_open_id(access_token):
         # If shop2game is blocking, we'll try an alternative shop2game endpoint or mobile API
         openid_url = "https://shop2game.com/api/auth/player_id_login"
         
-        # Try to use a different shop2game region which might have lighter protection
-        regions = ["https://shop2game.com", "https://vn.shop2game.com", "https://th.shop2game.com"]
+        # Use reachable shop2game regions
+        regions = ["https://shop2game.com", "https://vn.shop2game.com"]
         
         last_error = "Unknown error"
-        for base_url in regions:
-            api_url = f"{base_url}/api/auth/player_id_login"
-            for attempt in range(2):
-                headers = get_random_headers(referer=f"{base_url}/app")
-                headers.update({
-                    "Content-Type": "application/json",
-                    "X-Requested-With": "com.garena.game.kgid",
-                    "Origin": base_url,
-                    "Referer": f"{base_url}/app"
-                })
-                
-                if attempt > 0:
+        try:
+            for base_url in regions:
+                api_url = f"{base_url}/api/auth/player_id_login"
+                for attempt in range(2):
+                    # Rotate headers and identity
+                    headers = get_random_headers(referer=f"{base_url}/app")
+                    headers.update({
+                        "Content-Type": "application/json",
+                        "X-Requested-With": "com.garena.game.kgid",
+                        "Origin": base_url,
+                        "Referer": f"{base_url}/app",
+                        "Sec-Fetch-Dest": "empty",
+                        "Sec-Fetch-Mode": "cors",
+                        "Sec-Fetch-Site": "same-origin"
+                    })
+                    
+                    # Reset session for clean state
                     garena_session.cookies.clear()
                     try:
-                        garena_session.get(f"{base_url}/app", timeout=5)
+                        # Mimic landing page with more realistic timeout
+                        garena_session.get(f"{base_url}/app", headers=get_random_headers(), timeout=10)
+                        time.sleep(random.uniform(1.5, 3.5))
                     except: pass
 
-                try:
-                    time.sleep(random.uniform(2.0, 4.0))
-                    res = garena_session.post(api_url, headers=headers, json={"app_id": 100067, "login_id": str(uid)}, timeout=12)
-                    
-                    if res.status_code == 200:
-                        data = res.json()
-                        if "open_id" in data:
-                            return data["open_id"], None
-                        elif "url" in data and "captcha" in data["url"]:
-                            last_error = "Captcha triggered"
-                    elif res.status_code == 403:
-                        last_error = f"403 Forbidden at {base_url}"
-                except Exception as e:
-                    last_error = str(e)
+                    try:
+                        # More human-like payload and delay
+                        payload = {"app_id": 100067, "login_id": str(uid)}
+                        res = garena_session.post(api_url, headers=headers, json=payload, timeout=15)
+                        
+                        if res.status_code == 200:
+                            data = res.json()
+                            if "open_id" in data:
+                                return data["open_id"], None
+                            elif "url" in data and "captcha" in data["url"]:
+                                last_error = f"Captcha triggered at {base_url}"
+                                break 
+                        elif res.status_code == 403:
+                            last_error = f"403 Forbidden at {base_url} (WAF)"
+                    except Exception as e:
+                        last_error = f"Request error at {base_url}: {str(e)}"
+        except Exception as e:
+            last_error = f"System error: {str(e)}"
             
-        return None, f"Bypass failed: {last_error}. Try again after some time or use a different IP."
+        return None, f"Protection bypass failed: {last_error}"
     except Exception as e:
         return None, f"Exception: {str(e)}"
 
