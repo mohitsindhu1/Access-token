@@ -49,14 +49,15 @@ def encrypt_message(plaintext):
 def fetch_open_id(access_token):
     try:
         # Step 1: Inspect token to get UID
-        # We use a fresh session per request to handle cookies naturally while remaining "stateless" per API call
         session = requests.Session()
         
         uid_url = "https://prod-api.reward.ff.garena.com/redemption/api/auth/inspect_token/"
         
+        # Identity rotation
         headers = get_random_headers(referer="https://reward.ff.garena.com/")
         headers["access-token"] = access_token
         
+        # Mimic real user timing
         time.sleep(random.uniform(1.0, 2.0))
         uid_res = session.get(uid_url, headers=headers, timeout=10)
         
@@ -72,40 +73,51 @@ def fetch_open_id(access_token):
             return None, "Failed to extract UID"
 
         # Step 2: Login with UID
-        # Garena's login often requires some cookies from the main page to avoid 403
+        # shop2game protection is extremely high. 
+        # We'll try to rotate between different app IDs and use a fresh session identity
         base_url = "https://shop2game.com"
         openid_url = f"{base_url}/api/auth/player_id_login"
         
-        # Pre-flight to get essential cookies
-        try:
-            session.get(f"{base_url}/app", headers=get_random_headers(), timeout=10)
-            time.sleep(random.uniform(1.5, 3.0))
-        except:
-            pass
+        app_ids = [100067, 100065, 100063]
+        random.shuffle(app_ids)
 
-        # Use mobile app headers which are more resilient
-        headers = {
-            "User-Agent": "GarenaMSDK/4.0.19P9(SM-M526B ;Android 13;pt;BR;)",
-            "Content-Type": "application/json",
-            "X-Requested-With": "com.garena.game.kgid",
-            "Accept": "application/json",
-            "Connection": "keep-alive",
-            "Origin": base_url,
-            "Referer": f"{base_url}/app"
-        }
-        
-        payload = {"app_id": 100067, "login_id": str(uid)}
-        res = session.post(openid_url, headers=headers, json=payload, timeout=15)
-        
-        if res.status_code == 200:
-            data = res.json()
-            if "open_id" in data:
-                return data["open_id"], None
-            elif "url" in data and "captcha" in data["url"]:
-                return None, "Captcha triggered (WAF protection)"
-            return None, "Unexpected response from Garena"
+        for app_id in app_ids:
+            # Refresh session and identity for each app_id attempt if blocked
+            headers = {
+                "User-Agent": random.choice(USER_AGENTS),
+                "Content-Type": "application/json",
+                "X-Requested-With": "com.garena.game.kgid",
+                "Accept": "application/json",
+                "Connection": "keep-alive",
+                "Origin": base_url,
+                "Referer": f"{base_url}/app",
+                "X-Forwarded-For": f"{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
+            }
             
-        return None, f"Garena login failed: {res.status_code}. Protection is very high right now."
+            # Fresh pre-flight
+            try:
+                session.cookies.clear()
+                session.get(f"{base_url}/app", headers=get_random_headers(), timeout=10)
+                time.sleep(random.uniform(2.0, 4.0))
+            except:
+                pass
+
+            payload = {"app_id": app_id, "login_id": str(uid)}
+            try:
+                res = session.post(openid_url, headers=headers, json=payload, timeout=15)
+                
+                if res.status_code == 200:
+                    data = res.json()
+                    if "open_id" in data:
+                        return data["open_id"], None
+                    elif "url" in data and "captcha" in data["url"]:
+                        continue # Try next app_id
+                elif res.status_code == 403:
+                    continue # Try next app_id
+            except:
+                continue
+
+        return None, "Garena login failed after multiple attempts (403/Captcha). Protection is very high."
         
     except Exception as e:
         return None, f"Bypass failed: {str(e)}"
