@@ -48,17 +48,17 @@ def encrypt_message(plaintext):
 
 def fetch_open_id(access_token):
     try:
-        # Step 1: Inspect token to get UID - Stateless approach
+        # Step 1: Inspect token to get UID
+        # We use a fresh session per request to handle cookies naturally while remaining "stateless" per API call
+        session = requests.Session()
+        
         uid_url = "https://prod-api.reward.ff.garena.com/redemption/api/auth/inspect_token/"
         
         headers = get_random_headers(referer="https://reward.ff.garena.com/")
         headers["access-token"] = access_token
         
-        # Adding a small natural delay
         time.sleep(random.uniform(1.0, 2.0))
-        
-        # Direct request without persistent session cookies
-        uid_res = requests.get(uid_url, headers=headers, timeout=10)
+        uid_res = session.get(uid_url, headers=headers, timeout=10)
         
         if uid_res.status_code != 200:
             if uid_res.status_code == 401:
@@ -71,25 +71,31 @@ def fetch_open_id(access_token):
         if not uid:
             return None, "Failed to extract UID"
 
-        # Step 2: Login with UID - Stateless approach
-        openid_url = "https://shop2game.com/api/auth/player_id_login"
+        # Step 2: Login with UID
+        # Garena's login often requires some cookies from the main page to avoid 403
+        base_url = "https://shop2game.com"
+        openid_url = f"{base_url}/api/auth/player_id_login"
         
-        # Mobile SDK headers often don't require pre-existing cookies
+        # Pre-flight to get essential cookies
+        try:
+            session.get(f"{base_url}/app", headers=get_random_headers(), timeout=10)
+            time.sleep(random.uniform(1.5, 3.0))
+        except:
+            pass
+
+        # Use mobile app headers which are more resilient
         headers = {
             "User-Agent": "GarenaMSDK/4.0.19P9(SM-M526B ;Android 13;pt;BR;)",
             "Content-Type": "application/json",
             "X-Requested-With": "com.garena.game.kgid",
             "Accept": "application/json",
-            "Connection": "keep-alive"
+            "Connection": "keep-alive",
+            "Origin": base_url,
+            "Referer": f"{base_url}/app"
         }
         
-        # Random delay to simulate human-like behavior
-        time.sleep(random.uniform(2.0, 4.0))
-        
         payload = {"app_id": 100067, "login_id": str(uid)}
-        
-        # Direct request without persistent session cookies
-        res = requests.post(openid_url, headers=headers, json=payload, timeout=15)
+        res = session.post(openid_url, headers=headers, json=payload, timeout=15)
         
         if res.status_code == 200:
             data = res.json()
@@ -99,7 +105,7 @@ def fetch_open_id(access_token):
                 return None, "Captcha triggered (WAF protection)"
             return None, "Unexpected response from Garena"
             
-        return None, f"Garena login failed: {res.status_code}"
+        return None, f"Garena login failed: {res.status_code}. Protection is very high right now."
         
     except Exception as e:
         return None, f"Bypass failed: {str(e)}"
